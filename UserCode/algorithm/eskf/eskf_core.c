@@ -388,8 +388,8 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
         S[2*3 + m_col] = -PHt[14*3 + m_col];
     }
     // Add noise R
-    S[0*3+0] += eskf->config.odom_vel_noise;
-    S[1*3+1] += eskf->config.odom_vel_noise;
+    S[0*3+0] += eskf->config.odom_vel_x_noise;
+    S[1*3+1] += eskf->config.odom_vel_y_noise;
     S[2*3+2] += eskf->config.odom_wz_noise;
 
     // S^-1

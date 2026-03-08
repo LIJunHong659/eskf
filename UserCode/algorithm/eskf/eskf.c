@@ -53,7 +53,8 @@ void ESKF_App_Init(eskf_t *eskf) {
 
     // 里程计噪声 (如果用到)
     // 轮速计容易打滑，可以给大一点
-    config.odom_vel_noise  = 0.05f;         // (m/s)^2
+    config.odom_vel_x_noise  = 0.05f;         // (m/s)^2
+    config.odom_vel_y_noise  = 0.05f;         // (m/s)^2
     config.odom_wz_noise   = 0.05f;         // (rad/s)^2
     
     // --- C. 初始状态不确定性 (Initial Uncertainty) ---

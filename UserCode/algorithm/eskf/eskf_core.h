@@ -37,7 +37,8 @@ typedef struct {
     eskf_float_t pos_noise;         // 位置观测噪声 (m)^2. 若是 Lidar/GNSS 均可使用
     eskf_float_t pos_yaw_noise;     // 航向观测噪声 (rad)^2. 
     
-    eskf_float_t odom_vel_noise;    // 里程计速度噪声 (m/s)^2
+    eskf_float_t odom_vel_x_noise;  // 里程计X轴速度噪声 (m/s)^2
+    eskf_float_t odom_vel_y_noise;  // 里程计Y轴速度噪声 (m/s)^2
     eskf_float_t odom_wz_noise;     // 里程计角速度噪声 (rad/s)^2
 
     // -------------------------------------------------------------------------
