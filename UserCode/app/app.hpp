@@ -3,7 +3,11 @@
 
 #include "cmsis_os2.h"
 #include "eskf.h"
-
+#include "cmsis_os.h"
+#include "LocESKF.hpp"
+#include "time_sync.h"
+#include <cstddef>
+#include <cstdio>
 
 // 模拟
 // 假设imu数据格式  t, acc[3], gyro[3]

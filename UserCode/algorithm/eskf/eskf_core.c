@@ -192,7 +192,7 @@ void eskf_update_pos(eskf_t *eskf, const eskf_pos_meas_t *meas) {
         float h_angle = theta_norm * 0.5f;
         float s = sinf(h_angle) / theta_norm;
         eskf_quat_t dq = {cosf(h_angle), dx[6]*s, dx[7]*s, dx[8]*s};
-        X_curr.rot = quat_mul(dq, X_curr.rot); 
+        X_curr.rot = quat_mul(X_curr.rot, dq); 
         quat_normalize(&X_curr.rot);
     }
     X_curr.ba.x += dx[9];  X_curr.ba.y += dx[10]; X_curr.ba.z += dx[11];
@@ -426,7 +426,7 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
         float h_angle = theta_norm * 0.5f;
         float s = sinf(h_angle) / theta_norm;
         eskf_quat_t dq = {cosf(h_angle), dx[6]*s, dx[7]*s, dx[8]*s};
-        X_curr.rot = quat_mul(dq, X_curr.rot); 
+        X_curr.rot = quat_mul(X_curr.rot, dq); 
         quat_normalize(&X_curr.rot);
     }
     X_curr.ba.x += dx[9];  X_curr.ba.y += dx[10]; X_curr.ba.z += dx[11];

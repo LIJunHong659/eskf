@@ -56,6 +56,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Drivers/CMSIS/Include
     UserCode/algorithm/eskf  # 包含算法头文件
     UserCode/app             # 包含应用头文件
+    UserCode/ILoc            # 包含定位系统头文件
 )
 
 # 3. 链接 CMSIS-DSP 静态库
@@ -87,6 +88,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     UserCode/algorithm/eskf/time_sync.c
     UserCode/algorithm/eskf/eskf.c
     UserCode/app/app.cpp
+    UserCode/ILoc/ILoc.cpp
+    UserCode/ILoc/LocESKF.cpp
 )
 
 # -----------------------------------------------------------------------------
