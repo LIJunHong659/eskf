@@ -35,4 +35,9 @@ void IMU_get_data(Imu_data_t *imu_data);
 void Lidar_get_data(Lidar_data_t *lidar_data);
 void Odom_get_data(Odom_data_t *odom_data);
 float get_current_time(); // 获取当前时间戳，单位秒(高精度)
+
+// 中断处理函数声明
+void IMU_get_interrupt_handler(void *argument);
+void Odom_get_interrupt_handler(void *argument);
+void Lidar_get_interrupt_handler(void *argument);
 #endif // APP_HPP

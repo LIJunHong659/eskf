@@ -18,9 +18,10 @@ chassis_loc::LocESKF loc_eskf;
 time_sync_t lidar_time_sync; // Lidar 时间同步器实例
 
 osMutexId_t eskf_mutex_handle; // ESKF 互斥锁句柄
+
 osMessageQueueId_t imu_data_queue_handle; // IMU 数据队列句柄
 osMessageQueueId_t odom_data_queue_handle; // Odom 数据队列句柄
-
+osSemaphoreId_t lidar_data_sem_handle; // Lidar 数据信号量句柄
 Lidar_data_t lidar_data_buffer; // Lidar 数据缓冲区
 
 // imu数据获取中断处理函数
@@ -39,6 +40,12 @@ void Odom_get_interrupt_handler(void *argument) {
     Odom_data_t odom_data_temp;
     Odom_get_data(&odom_data_temp); // 获取里程计数据并存储到缓冲区
     osMessageQueuePut(odom_data_queue_handle, &odom_data_temp, 0, 0);
+}
+
+// Lidar数据获取中断处理函数
+void Lidar_get_interrupt_handler(void *argument) {
+    Lidar_get_data(&lidar_data_buffer); // 获取 Lidar 数据并存储到缓冲区
+    osSemaphoreRelease(lidar_data_sem_handle); // 释放信号量，通知 Lidar_Task 数据已就绪
 }
 
 
@@ -114,30 +121,32 @@ extern "C" void Imu_Odom_Task(void *argument) {
 
 extern "C" void Lidar_Task(void *argument) {
     for(;;){
-        Lidar_get_data(&lidar_data_buffer); // 获取 Lidar 数据并存储到缓冲区
+        // 等待信号量（阻塞，直到 Lidar 数据到达）
+        if (osSemaphoreAcquire(lidar_data_sem_handle, osWaitForever) == osOK) {
+            // 数据已经在中断中读取到 lidar_data_buffer
+            
+            // --- 使用 time_sync 模块进行对齐 ---
+           
+            float sys_time_now = get_current_time();
+            
+            // 更新同步器状态
+            // 输入: (PC发送时间/Lidar内部时间, STM32接收时间)
+            time_sync_update(&lidar_time_sync, lidar_data_buffer.start_t, sys_time_now);
+            
+            // 获取对齐后的系统时间
+            // aligned_time = lidar_data.start_t + offset
+            float lidar_sys_time = (float)time_sync_get_aligned_time(&lidar_time_sync, lidar_data_buffer.start_t);
         
-        // --- 使用 time_sync 模块进行对齐 ---
-       
-        float sys_time_now = get_current_time();
-        
-        // 更新同步器状态
-        // 输入: (PC发送时间/Lidar内部时间, STM32接收时间)
-        time_sync_update(&lidar_time_sync, lidar_data_buffer.start_t, sys_time_now);
-        
-        // 获取对齐后的系统时间
-        // aligned_time = lidar_data.start_t + offset
-        float lidar_sys_time = (float)time_sync_get_aligned_time(&lidar_time_sync, lidar_data_buffer.start_t);
-    
-        if (osMutexAcquire(eskf_mutex_handle, 100) == osOK) { // 尝试获取互斥锁，避免长时间阻塞
-            // 使用 LocESKF 处理 Lidar 数据
-            loc_eskf.UpdateLidar(lidar_data_buffer.pos_x,
-                               lidar_data_buffer.pos_y,
-                               lidar_data_buffer.yaw,
-                               1,  // has_yaw = 1
-                               lidar_sys_time);
-            osMutexRelease(eskf_mutex_handle); // 释放互斥锁
+            if (osMutexAcquire(eskf_mutex_handle, 100) == osOK) {
+                // 使用 LocESKF 处理 Lidar 数据
+                loc_eskf.UpdateLidar(lidar_data_buffer.pos_x,
+                                   lidar_data_buffer.pos_y,
+                                   lidar_data_buffer.yaw,
+                                   1,  // has_yaw = 1
+                                   lidar_sys_time);
+                osMutexRelease(eskf_mutex_handle);
+            }
         }
-        osDelay(100);
     }
 }
 
