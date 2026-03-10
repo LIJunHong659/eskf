@@ -8,7 +8,7 @@
 
 #include "ILoc.hpp"
 #include "eskf.h"
-#include <cstring>
+#include <string.h>
 
 namespace chassis_loc
 {

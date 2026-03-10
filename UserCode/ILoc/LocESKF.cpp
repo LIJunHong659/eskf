@@ -10,7 +10,7 @@ namespace chassis_loc
 LocESKF::LocESKF()
 {
     // 清零ESKF实例
-    std::memset(&eskf_instance_, 0, sizeof(eskf_t));
+    memset(&eskf_instance_, 0, sizeof(eskf_t));
 }
 
 bool LocESKF::Init(const eskf_config_t* config)
