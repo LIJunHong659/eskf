@@ -91,22 +91,95 @@ void eskf_predict(eskf_t *eskf, const eskf_imu_meas_t *imu, eskf_float_t dt) {
 static int buffer_find_state_idx(eskf_t *eskf, double t_target) {
     if (eskf->buf_count == 0) return -1;
 
-    int best_idx = -1;
-    double min_diff = 1e9;
+    // 二分查找优化 (O(log n) 替代 O(n))
+    int head = eskf->buf_tail;
+    int tail = (eskf->buf_head - 1 + ESKF_BUF_SIZE) % ESKF_BUF_SIZE;
+    int count = eskf->buf_count;
     
-    int idx = eskf->buf_tail;
-    for (int i = 0; i < eskf->buf_count; i++) {
-        double diff = fabs(eskf->t_buf[idx] - t_target);
-        if (diff < min_diff) {
-            min_diff = diff;
-            best_idx = idx;
+    // 处理环形缓冲区的边界情况
+    if (eskf->t_buf[head] <= eskf->t_buf[tail]) {
+        // 缓冲区未环绕，时间戳单调递增
+        int left = 0, right = count - 1;
+        while (left <= right) {
+            int mid = (left + right) / 2;
+            int mid_idx = (head + mid) % ESKF_BUF_SIZE;
+            double mid_time = eskf->t_buf[mid_idx];
+            
+            if (mid_time == t_target) {
+                return mid_idx; // 精确匹配
+            } else if (mid_time < t_target) {
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
         }
-        idx = (idx + 1) % ESKF_BUF_SIZE;
+        
+        // 找到最接近的两个点
+        int best_idx;
+        if (left >= count) {
+            best_idx = (head + count - 1) % ESKF_BUF_SIZE;
+        } else if (left == 0) {
+            best_idx = head;
+        } else {
+            int idx1 = (head + left - 1) % ESKF_BUF_SIZE;
+            int idx2 = (head + left) % ESKF_BUF_SIZE;
+            double diff1 = fabs(eskf->t_buf[idx1] - t_target);
+            double diff2 = fabs(eskf->t_buf[idx2] - t_target);
+            best_idx = (diff1 < diff2) ? idx1 : idx2;
+        }
+        
+        // 检查时间差是否在允许范围内
+        if (fabs(eskf->t_buf[best_idx] - t_target) > 0.1) {
+            return -1; // Too old or too new
+        }
+        return best_idx;
+    } else {
+        // 缓冲区环绕，时间戳分为两部分
+        // 先检查目标时间戳在哪个部分
+        if (t_target >= eskf->t_buf[head]) {
+            // 在头部部分查找
+            int left = 0, right = (tail - head + ESKF_BUF_SIZE) % ESKF_BUF_SIZE;
+            while (left <= right) {
+                int mid = (left + right) / 2;
+                int mid_idx = (head + mid) % ESKF_BUF_SIZE;
+                double mid_time = eskf->t_buf[mid_idx];
+                
+                if (mid_time == t_target) {
+                    return mid_idx;
+                } else if (mid_time < t_target) {
+                    left = mid + 1;
+                } else {
+                    right = mid - 1;
+                }
+            }
+            int best_idx = (head + left - 1) % ESKF_BUF_SIZE;
+            if (fabs(eskf->t_buf[best_idx] - t_target) > 0.1) {
+                return -1;
+            }
+            return best_idx;
+        } else {
+            // 在尾部部分查找
+            int left = 0, right = (ESKF_BUF_SIZE - tail - 1);
+            while (left <= right) {
+                int mid = (left + right) / 2;
+                int mid_idx = (tail - mid + ESKF_BUF_SIZE) % ESKF_BUF_SIZE;
+                double mid_time = eskf->t_buf[mid_idx];
+                
+                if (mid_time == t_target) {
+                    return mid_idx;
+                } else if (mid_time < t_target) {
+                    right = mid - 1;
+                } else {
+                    left = mid + 1;
+                }
+            }
+            int best_idx = (tail - left + 1 + ESKF_BUF_SIZE) % ESKF_BUF_SIZE;
+            if (fabs(eskf->t_buf[best_idx] - t_target) > 0.1) {
+                return -1;
+            }
+            return best_idx;
+        }
     }
-    
-    if (min_diff > 0.1) return -1; // Too old or too new
-    
-    return best_idx;
 }
 
 void eskf_update_pos(eskf_t *eskf, const eskf_pos_meas_t *meas) {
