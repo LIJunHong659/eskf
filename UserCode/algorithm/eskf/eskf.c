@@ -7,15 +7,7 @@
 // ----------------------------------------------------------------------------
 
 
-// 获取当前系统时间戳 (秒) - 需要用户根据实际平台实现
-extern uint32_t HAL_GetTick(void); // 声明 HAL_GetTick
-static float get_sys_time_sec(void) {
-    // 示例: 如果你有 HAL_GetTick() (ms)
-    // return HAL_GetTick() * 0.001f;
-    
-    // 这里仅做编译通过，实际必须替换为真实时间
-    return (float)HAL_GetTick() * 0.001f; 
-}
+
 
 // ----------------------------------------------------------------------------
 // API 实现
@@ -98,10 +90,10 @@ void ESKF_App_IMU_Handler(eskf_t *eskf, float acc_raw[3], float gyro_raw[3], flo
 }
 
 
-void ESKF_App_Odom_Handler(eskf_t *eskf, float v_body_x, float v_body_y, float v_body_wz) {
+void ESKF_App_Odom_Handler(eskf_t *eskf, float v_body_x, float v_body_y, float v_body_wz, float timestamp) {
     eskf_odom_meas_t odom;
-    // 节省算力，轮速计不用重积分，直接更新当前状态即可。
-    odom.timestamp = get_sys_time_sec();
+    // 使用传入的时间戳，确保与 IMU 数据使用同一时间基准
+    odom.timestamp = timestamp;
     
     odom.v_body_x  = v_body_x;
     odom.v_body_y  = v_body_y;

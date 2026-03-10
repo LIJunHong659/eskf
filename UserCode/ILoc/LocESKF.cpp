@@ -60,14 +60,14 @@ void LocESKF::UpdateIMU(float acc_raw[3], float gyro_raw[3], float dt, double ti
     SyncStateFromESKF();
 }
 
-void LocESKF::UpdateOdom(float v_body_x, float v_body_y, float v_body_wz)
+void LocESKF::UpdateOdom(float v_body_x, float v_body_y, float v_body_wz, float timestamp)
 {
     if (!initialized_) {
         return;
     }
 
-    // 使用应用层封装函数
-    ESKF_App_Odom_Handler(&eskf_instance_, v_body_x, v_body_y, v_body_wz);
+    // 使用应用层封装函数，传入时间戳确保与 IMU 数据使用同一时间基准
+    ESKF_App_Odom_Handler(&eskf_instance_, v_body_x, v_body_y, v_body_wz, timestamp);
     
     // 同步更新后的状态到ILoc
     SyncStateFromESKF();

@@ -39,6 +39,10 @@ void IMU_get_interrupt_handler(void *argument) {
 void Odom_get_interrupt_handler(void *argument) {
     Odom_data_t odom_data_temp;
     Odom_get_data(&odom_data_temp); // 获取里程计数据并存储到缓冲区
+    
+    // 使用系统时间作为时间戳，确保与 IMU 数据在同一时间基准
+    odom_data_temp.t = get_current_time();
+    
     osMessageQueuePut(odom_data_queue_handle, &odom_data_temp, 0, 0);
 }
 
@@ -110,9 +114,11 @@ extern "C" void Imu_Odom_Task(void *argument) {
             // 处理里程计数据（如果有更新）
             // 非阻塞检查 Odom 数据
             while (osMessageQueueGet(odom_data_queue_handle, &odom_data_buffer, NULL, 0) == osOK) {
+                // 使用里程计数据的时间戳，确保与 IMU 数据在同一时间基准
                 loc_eskf.UpdateOdom(odom_data_buffer.v_body_x,
                                   odom_data_buffer.v_body_y,
-                                  odom_data_buffer.v_body_wz);
+                                  odom_data_buffer.v_body_wz,
+                                  odom_data_buffer.t);
             }
             osMutexRelease(eskf_mutex_handle); // 释放互斥锁
         }
@@ -130,11 +136,14 @@ extern "C" void Lidar_Task(void *argument) {
             float sys_time_now = get_current_time();
             
             // 更新同步器状态
-            // 输入: (PC发送时间/Lidar内部时间, STM32接收时间)
-            time_sync_update(&lidar_time_sync, lidar_data_buffer.start_t, sys_time_now);
+            // 输入: (上位机发送时间send_t, STM32接收时间sys_time_now)
+            // 使用 send_t 计算时钟偏移（因为 send_t 是上位机实际发送的时刻）
+            time_sync_update(&lidar_time_sync, lidar_data_buffer.send_t, sys_time_now);
             
             // 获取对齐后的系统时间
-            // aligned_time = lidar_data.start_t + offset
+            // 使用 start_t（lidar开始检测的时间）转换为STM32时间轴
+            // aligned_time = start_t + offset
+            // 这个时间用于滤波器状态回退
             float lidar_sys_time = (float)time_sync_get_aligned_time(&lidar_time_sync, lidar_data_buffer.start_t);
         
             if (osMutexAcquire(eskf_mutex_handle, 100) == osOK) {

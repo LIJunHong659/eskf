@@ -64,7 +64,7 @@ public:
      * @param v_body_y 车体系侧向速度 (m/s)，差速底盘通常为0
      * @param v_body_wz 车体系旋转角速度 (rad/s)
      */
-    void UpdateOdom(float v_body_x, float v_body_y, float v_body_wz);
+    void UpdateOdom(float v_body_x, float v_body_y, float v_body_wz, float timestamp);
 
     /**
      * @brief Lidar/UWB/SLAM绝对定位数据处理 (建议1Hz~20Hz)

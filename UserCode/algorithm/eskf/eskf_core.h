@@ -74,6 +74,13 @@ typedef struct {
     eskf_cov_t   P_buf[ESKF_BUF_SIZE]; // 协方差历史
     eskf_float_t t_buf[ESKF_BUF_SIZE]; // 时间戳
     
+    // 里程计数据缓冲区 (用于重积分时使用)
+    eskf_odom_meas_t odom_buf[ESKF_BUF_SIZE];
+    eskf_odom_meas_t latest_odom;
+    uint8_t has_latest_odom;
+    uint8_t odom_valid[ESKF_BUF_SIZE]; // 标记该时刻是否有有效的里程计数据
+    eskf_float_t odom_timestamp_buf[ESKF_BUF_SIZE]; // 里程计数据时间戳
+    
     int buf_head;    
     int buf_count;   
     int buf_tail; 
@@ -130,6 +137,23 @@ void eskf_get_state(const eskf_t *eskf, eskf_state_t *out_state);
  * @brief 检查滤波器是否已初始化
  */
 int eskf_is_initialized(const eskf_t *eskf);
+
+// 内部函数声明
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief 内部里程计更新函数 (用于重积分过程中)
+ * @param eskf 滤波器句柄
+ * @param meas 里程计数据
+ * @param imu_meas 对应时刻的 IMU 数据
+ */
+void eskf_update_odom_internal(eskf_t *eskf, const eskf_odom_meas_t *meas, const eskf_imu_meas_t *imu_meas);
+
+#ifdef __cplusplus
+}
+#endif
 
 #ifdef __cplusplus
 }

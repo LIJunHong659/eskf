@@ -44,7 +44,7 @@ void ESKF_App_IMU_Handler(eskf_t *eskf, float acc_raw[3], float gyro_raw[3], flo
  * @param v_body_y   车体系侧向速度 (m/s), 差速底盘通常为0
  * @param v_body_wz  车体系旋转角速度 (rad/s), 可直接使用 IMU 的 Z 轴角速度
  */
-void ESKF_App_Odom_Handler(eskf_t *eskf, float v_body_x, float v_body_y, float v_body_wz);
+void ESKF_App_Odom_Handler(eskf_t *eskf, float v_body_x, float v_body_y, float v_body_wz, float timestamp);
 
 /**
  * @brief Lidar/UWB/SLAM 相对定位数据处理回调函数 (直接输入 x, y 坐标)

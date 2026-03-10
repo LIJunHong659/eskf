@@ -38,6 +38,15 @@ int eskf_init(eskf_t *eskf, const eskf_config_t *config) {
         eskf->P.P[i * 15 + i] = var * var;
     }
 
+    // 初始化里程计数据有效性标记和时间戳缓冲区
+    for (int i = 0; i < ESKF_BUF_SIZE; i++) {
+        eskf->odom_valid[i] = 0;
+        eskf->odom_timestamp_buf[i] = 0.0f;
+    }
+
+    // 初始化最新里程计数据标记
+    eskf->has_latest_odom = 0;
+
     eskf->is_initialized = 1;
     return 0; // Success
 }
@@ -62,7 +71,10 @@ void eskf_predict(eskf_t *eskf, const eskf_imu_meas_t *imu, eskf_float_t dt) {
     eskf->P_buf[idx]   = eskf->P;
     eskf->imu_buf[idx] = *imu;     
     eskf->t_buf[idx]   = imu->timestamp;
-
+    
+    // 注意：里程计数据现在在 eskf_update_odom 中存储
+    // 这里只存储 IMU 数据和状态
+    
     eskf->buf_head = (eskf->buf_head + 1) % ESKF_BUF_SIZE;
     if (eskf->buf_count < ESKF_BUF_SIZE) {
         eskf->buf_count++;
@@ -226,6 +238,16 @@ void eskf_update_pos(eskf_t *eskf, const eskf_pos_meas_t *meas) {
         // 调用标准预测函数，同时更新 temp_eskf.X 和 temp_eskf.P
         propagate_one_step(&temp_eskf, meas_seg, dt_segment);
         
+        // 检查该时刻是否有有效的里程计数据
+        // 使用最近邻匹配，时间差超过阈值则跳过
+        if (eskf->odom_valid[next_idx]) {
+            float time_diff = fabs(eskf->odom_timestamp_buf[next_idx] - eskf->t_buf[next_idx]);
+            // 时间差阈值：50ms，超过则跳过更新
+            if (time_diff < 0.015f) {
+                eskf_update_odom_internal(&temp_eskf, &eskf->odom_buf[next_idx], meas_seg);
+            }
+        }
+        
         // 可选：更新历史 Buffer 中的值，这样如果未来还有针对该时间段的观测，
         // 能基于更准确的状态进行更新。
         eskf->X_buf[next_idx] = temp_eskf.X;
@@ -258,6 +280,19 @@ static void quat_to_rotmat(eskf_quat_t q, float *R) {
 
 void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
     if (!eskf->is_initialized) return;
+
+    // 更新最新里程计数据
+    eskf->latest_odom = *meas;
+    eskf->has_latest_odom = 1;
+    
+    // 找到与里程计数据时间戳最接近的 IMU 数据位置
+    int odom_idx = buffer_find_state_idx(eskf, meas->timestamp);
+    if (odom_idx >= 0) {
+        // 存储里程计数据到对应的缓冲区位置
+        eskf->odom_buf[odom_idx] = *meas;
+        eskf->odom_timestamp_buf[odom_idx] = meas->timestamp;
+        eskf->odom_valid[odom_idx] = 1;
+    }
 
     // 1. 延迟补偿: 查找历史状态
     int state_idx = buffer_find_state_idx(eskf, meas->timestamp);
@@ -447,6 +482,17 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
         if (dt_segment <= 1e-4f) dt_segment = 0.01f; 
         const eskf_imu_meas_t *meas_seg = &eskf->imu_buf[next_idx];
         propagate_one_step(&temp_eskf, meas_seg, dt_segment);
+        
+        // 检查该时刻是否有有效的里程计数据
+        // 使用最近邻匹配，时间差超过阈值则跳过
+        if (eskf->odom_valid[next_idx]) {
+            float time_diff = fabs(eskf->odom_timestamp_buf[next_idx] - eskf->t_buf[next_idx]);
+            // 时间差阈值：50ms，超过则跳过更新
+            if (time_diff < 0.05f) {
+                eskf_update_odom_internal(&temp_eskf, &eskf->odom_buf[next_idx], meas_seg);
+            }
+        }
+        
         eskf->X_buf[next_idx] = temp_eskf.X;
         eskf->P_buf[next_idx] = temp_eskf.P;
         curr_idx = next_idx;
@@ -456,6 +502,192 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
     eskf->X = temp_eskf.X;
     eskf->P = temp_eskf.P;
     eskf->last_success_update_time = meas->timestamp;
+}
+
+// ------------------------------------------------------------------------
+// 内部里程计更新函数 (用于重积分过程中)
+// ------------------------------------------------------------------------
+void eskf_update_odom_internal(eskf_t *eskf, const eskf_odom_meas_t *meas, const eskf_imu_meas_t *imu_meas) {
+    if (!eskf->is_initialized) return;
+
+    eskf_state_t X_curr = eskf->X;
+    eskf_cov_t   *P_ptr = &eskf->P;
+    float *P = P_ptr->P;
+
+    // 1. 准备数据
+    // R: Rotation from Body to World (3x3)
+    float R[9];
+    quat_to_rotmat(X_curr.rot, R);
+    
+    // v_w: World Velocity
+    float v_w[3] = {X_curr.vel.x, X_curr.vel.y, X_curr.vel.z};
+
+    // 使用传入的 IMU 数据 (用于计算角速度残差)
+    if (imu_meas == NULL) {
+        // 如果没有传入 IMU 数据，使用 last_gyro 和 last_acc
+        eskf_imu_meas_t temp_imu;
+        temp_imu.gyro = eskf->last_gyro;
+        temp_imu.acc = eskf->last_acc;
+        imu_meas = &temp_imu;
+    }
+
+    // 2. 准备观测 (Predict Measurement)
+    // v_b_pred = R^T * v_w
+    // wz_pred  = gyro_z - bg_z
+    float v_b_pred[3];
+    float R_inv[9]; // R^T
+    mat_trans(R, R_inv, 3, 3);
+    
+    // v_body = R^T * v_world
+    for(int i=0; i<3; i++) {
+        v_b_pred[i] = R_inv[i*3+0] * v_w[0] + R_inv[i*3+1] * v_w[1] + R_inv[i*3+2] * v_w[2];
+    }
+
+    // 3. 残差 (Residual)
+    // 融合: Vx, Vy, Wz
+    float Y[3];
+    Y[0] = meas->v_body_x - v_b_pred[0];
+    Y[1] = meas->v_body_y - v_b_pred[1];
+    Y[2] = meas->v_body_wz - (imu_meas->gyro.z - X_curr.bg.z);
+
+    // 4. 雅可比矩阵 H (3 x 15)
+    // H 结构:
+    // Rows 0,1 (Vel): 对 Vel 和 Att 有非零块
+    // Row  2   (Wz) : 对 Bg 有非零块 (H_wz_bg = -1, 因为 pred = gyro - bg, so d(pred)/d(bg) = -1)
+    
+    // 计算 H_theta = R^T * [v_w]x
+    float vx_skew[9] = {
+           0,   -v_w[2],  v_w[1],
+         v_w[2],     0,  -v_w[0],
+        -v_w[1],  v_w[0],     0
+    };
+    
+    // H_theta = R^T * [v_w]x
+    float H_theta[9]; 
+    mat_mul(R_inv, vx_skew, H_theta, 3, 3, 3);
+    
+    // 用 H_vel 表示 R^T (2x3部分)
+    // 用 H_att 表示 H_theta (2x3部分)
+
+    // PHt = P * H^T  (15 x 3)
+    float PHt[45]; // 15 rows, 3 cols
+    
+    for (int r = 0; r < 15; r++) {
+        float *row_P = &P[r*15];
+        
+        // --- Col 0 (Meas Vx) ---
+        // H = [0, R^T[0], R^T[0]*[v]x, 0, 0]
+        float val0 = 0;
+        val0 += row_P[3] * R_inv[0*3+0] + row_P[4] * R_inv[0*3+1] + row_P[5] * R_inv[0*3+2]; // P*H_vel^T
+        val0 += row_P[6] * H_theta[0*3+0] + row_P[7] * H_theta[0*3+1] + row_P[8] * H_theta[0*3+2]; // P*H_att^T
+        PHt[r*3 + 0] = val0;
+
+        // --- Col 1 (Meas Vy) ---
+        // H = [0, R^T[1], R^T[1]*[v]x, 0, 0]
+        float val1 = 0;
+        val1 += row_P[3] * R_inv[1*3+0] + row_P[4] * R_inv[1*3+1] + row_P[5] * R_inv[1*3+2]; 
+        val1 += row_P[6] * H_theta[1*3+0] + row_P[7] * H_theta[1*3+1] + row_P[8] * H_theta[1*3+2];
+        PHt[r*3 + 1] = val1;
+        
+        // --- Col 2 (Meas Wz) ---
+        // 观测方程 h(x) = imu_wz - bg_z
+        // H = d(y)/dx = d(meas - h(x))/dx = d(- (-bg_z))/dx = d(bg_z)/dx = 1 ????
+        // 等一下，Residual Y = Meas - Pred.
+        // Pred = imu - bg.
+        // Y = meas - (imu - bg) = meas - imu + bg.
+        // dY/dbg = 1.
+        // 也就是说，H 在 bg_z (index 14) 处为 1. (之前推导以为是-1, 这里必须再次确认)
+        // 状态更新: x += K * Y.
+        // 如果测量的 Wz > 预测的 (imu-bg), 说明 Y > 0.
+        // 意味着 "真实的Wz" 比 "预测的" 大。
+        // IMU测量值是固定的。意味着 bg 可能估计大了(减多了)，或者 bg 估计小了？
+        // 如果 Y > 0 => meas > imu - bg => meas - imu > -bg => bg > imu - meas.
+        // 这表示我们需要增加 bg。
+        // 如果 H=1, K 正比于 P*H^T = P_col_bg.
+        // x += K * Y => bg += P_bb * 1 * Y. 正相关。
+        // 所以 H 对应 bg_z 应该是 1.
+        
+        // H = [0, ..., 0, -1 (at idx 14)] (d(meas - (imu - bg))/dbg = 1) -> No.
+        // H = d(h(x))/dx. h(x) = imu - bg. H_bg = -1.
+        // So PHt = P * H^T = P * (-1) = -P_col_14.
+        PHt[r*3 + 2] = -row_P[14]; 
+    }
+
+    // S = H * PHt + Noise (3x3)
+    float S[9] = {0}; 
+    
+    // 填充 S 的前 2x2 (速度部分)
+    // Row 0,1 of H corresponds to Vx, Vy
+    for(int m_row = 0; m_row < 2; m_row++) {
+        for(int m_col = 0; m_col < 3; m_col++) {
+             // S[r, c] = H[r] * PHt[:, c]
+             // H[r] has part R_inv[r] at Vel(3,4,5) and H_theta[r] at Att(6,7,8)
+             float val = 0;
+             val += R_inv[m_row*3+0] * PHt[3*3 + m_col];
+             val += R_inv[m_row*3+1] * PHt[4*3 + m_col];
+             val += R_inv[m_row*3+2] * PHt[5*3 + m_col];
+             
+             val += H_theta[m_row*3+0] * PHt[6*3 + m_col];
+             val += H_theta[m_row*3+1] * PHt[7*3 + m_col];
+             val += H_theta[m_row*3+2] * PHt[8*3 + m_col];
+             S[m_row*3 + m_col] = val;
+        }
+    }
+    
+    // 填充 S 的第 2 行 (Wz部分)
+    // dim 2 的 H 只有 H[14] = -1, 其他为0
+    for(int m_col = 0; m_col < 3; m_col++) {
+        // S[2, c] = H[2] * PHt[:, c] = -1.0 * PHt[14, c]
+        S[2*3 + m_col] = -PHt[14*3 + m_col];
+    }
+    // Add noise R
+    S[0*3+0] += eskf->config.odom_vel_x_noise;
+    S[1*3+1] += eskf->config.odom_vel_y_noise;
+    S[2*3+2] += eskf->config.odom_wz_noise;
+
+    // S^-1
+    float Si[9];
+    if (mat_inv(S, Si, 3) != 0) return;
+
+    // K = PHt * Si (15x3 * 3x3 = 15x3)
+    float K[45]; // 15*3
+    mat_mul(PHt, Si, K, 15, 3, 3);
+
+    // dx = K * Y (15x3 * 3x1)
+    float dx[15];
+    mat_mul(K, Y, dx, 15, 3, 1);
+    
+    // Update P = P - K * PHt^T
+    // P (15x15) -= K(15x3) * PHt^T(3x15)
+    for(int r=0; r<15; r++) {
+        for(int c=0; c<15; c++) {
+            float corr = 0.0f;
+            for(int k=0; k<3; k++) {
+                corr += K[r*3+k] * PHt[c*3+k];
+            }
+            P[r*15+c] -= corr;
+        }
+    }
+    
+    // 状态注入
+    X_curr.pos.x += dx[0]; X_curr.pos.y += dx[1]; X_curr.pos.z += dx[2];
+    X_curr.vel.x += dx[3]; X_curr.vel.y += dx[4]; X_curr.vel.z += dx[5];
+    
+    eskf_vec3_t theta_err = {dx[6], dx[7], dx[8]};
+    float theta_norm = vec3_norm(theta_err);
+    if (theta_norm > 1e-6f) {
+        float h_angle = theta_norm * 0.5f;
+        float s = sinf(h_angle) / theta_norm;
+        eskf_quat_t dq = {cosf(h_angle), dx[6]*s, dx[7]*s, dx[8]*s};
+        X_curr.rot = quat_mul(X_curr.rot, dq); 
+        quat_normalize(&X_curr.rot);
+    }
+    X_curr.ba.x += dx[9];  X_curr.ba.y += dx[10]; X_curr.ba.z += dx[11];
+    X_curr.bg.x += dx[12]; X_curr.bg.y += dx[13]; X_curr.bg.z += dx[14];
+
+    // 更新当前状态
+    eskf->X = X_curr;
+    eskf->P = *P_ptr;
 }
 
 void eskf_get_state(const eskf_t *eskf, eskf_state_t *out_state) {
