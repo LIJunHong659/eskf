@@ -66,7 +66,8 @@ extern "C" void Init(void *argument) {
     imu_data_queue_handle = osMessageQueueNew(20, sizeof(Imu_data_t), NULL); // 队列长度20，元素大小为Imu_data_t
     // 创建Odom储存队列
     odom_data_queue_handle = osMessageQueueNew(10, sizeof(Odom_data_t), NULL);
-
+    // 创建Lidar信号量
+    lidar_data_sem_handle = osSemaphoreNew(0, 1, NULL);
     // 初始化 Lidar 时间同步器
     time_sync_init(&lidar_time_sync, 0.1f, 0.001f);
     
