@@ -20,30 +20,22 @@ static float quat_to_yaw(eskf_quat_t q);
 int eskf_init(eskf_t *eskf, const eskf_config_t *config) {
     if (!eskf || !config) return -1;
     
-    // 验证配置参数
-    if (config->acc_noise < 0 || config->gyro_noise < 0 ||
-        config->init_pos_unc < 0 || config->init_vel_unc < 0 ||
-        config->init_att_unc < 0 || config->init_bias_unc < 0) {
-        return -2; // 无效的配置参数
-    }
-    
     memset(eskf, 0, sizeof(eskf_t));
     eskf->config = *config;
     
     // 初始化状态
     eskf->X.rot.w = 1.0f; // Unit Quaternion
-    // 其他状态变量保持为0，或根据需要设置合理的默认值
     
     // 初始化协方差 P0 (对角阵)
     mat_zero(eskf->P.P, ESKF_STATE_DIM, ESKF_STATE_DIM);
     for (int i = 0; i < ESKF_STATE_DIM; i++) {
         float var;
-        if (i < 2) var = config->init_pos_unc;      // 只初始化x,y位置
-        else if (i < 4) var = config->init_vel_unc; // 只初始化x,y速度
-        else if (i < 5) var = config->init_att_unc; // 只初始化yaw姿态
+        if (i < 3) var = config->init_pos_unc;
+        else if (i < 6) var = config->init_vel_unc;
+        else if (i < 9) var = config->init_att_unc;
         else var = config->init_bias_unc;
         
-        eskf->P.P[i * ESKF_STATE_DIM + i] = var * var; // 使用宏定义
+        eskf->P.P[i * 15 + i] = var * var;
     }
 
     // 初始化里程计数据有效性标记和时间戳缓冲区
@@ -54,7 +46,6 @@ int eskf_init(eskf_t *eskf, const eskf_config_t *config) {
 
     // 初始化最新里程计数据标记
     eskf->has_latest_odom = 0;
-    eskf->last_success_update_time = 0.0f; // 初始化时间戳
 
     eskf->is_initialized = 1;
     return 0; // Success
@@ -195,7 +186,6 @@ void eskf_update_pos(eskf_t *eskf, const eskf_pos_meas_t *meas) {
     if (!eskf->is_initialized) {
         eskf->X.pos.x = meas->x;
         eskf->X.pos.y = meas->y;
-        // z位置保持固定
         if (meas->has_yaw) {
             float cy = cosf(meas->yaw * 0.5f);
             float sy = sinf(meas->yaw * 0.5f);
@@ -224,15 +214,15 @@ void eskf_update_pos(eskf_t *eskf, const eskf_pos_meas_t *meas) {
     Y[1] = meas->y - X_curr.pos.y;
     if (meas->has_yaw) Y[2] = normalize_angle(meas->yaw - quat_to_yaw(X_curr.rot));
 
-    // H 矩阵稀疏特性: H_pos 选择 Pos(0,1), H_yaw 选择 ThetaZ(4)
-    int idx_map[3] = {0, 1, 4};
+    // H 矩阵稀疏特性: H_pos 选择 Pos(0,1), H_yaw 选择 ThetaZ(8)
+    int idx_map[3] = {0, 1, 8}; 
 
-    // PHt = P * H^T (Extract columns 0, 1, [4] of P)
-    float PHt[11 * 3]; 
+    // PHt = P * H^T (Extract columns 0, 1, [8] of P)
+    float PHt[15 * 3]; 
     for (int c = 0; c < meas_dim; c++) {
         int state_col = idx_map[c];
-        for (int r = 0; r < 11; r++) {
-            PHt[r * meas_dim + c] = P[r * 11 + state_col];
+        for (int r = 0; r < 15; r++) {
+            PHt[r * meas_dim + c] = P[r * 15 + state_col];
         }
     }
 
@@ -253,43 +243,45 @@ void eskf_update_pos(eskf_t *eskf, const eskf_pos_meas_t *meas) {
     if (mat_inv(S, Si, meas_dim) != 0) return;
 
     // K = PHt * Si
-    float K[11 * 3];
-    mat_mul(PHt, Si, K, 11, meas_dim, meas_dim);
+    float K[15 * 3];
+    mat_mul(PHt, Si, K, 15, meas_dim, meas_dim);
     
     // dx = K * Y
-    float dx[11];
-    mat_mul(K, Y, dx, 11, meas_dim, 1);
+    float dx[15];
+    mat_mul(K, Y, dx, 15, meas_dim, 1);
     
     // Update P = P - K * (H P)
-    // HP (meas_dim x 11) is Transpose of PHt (symmetric P)
-    for (int i = 0; i < 11; i++) {
-        for (int j = 0; j < 11; j++) {
+    // HP (meas_dim x 15) is Transpose of PHt (symmetric P)
+    for (int i = 0; i < 15; i++) {
+        for (int j = 0; j < 15; j++) {
             float correction = 0.0f;
             for (int k = 0; k < meas_dim; k++) {
                 // K[i][k] * HP[k][j] -> HP[k][j] is P[idx_map[k]][j]
-                correction += K[i * meas_dim + k] * P[idx_map[k] * 11 + j];
+                correction += K[i * meas_dim + k] * P[idx_map[k] * 15 + j];
             }
-            P[i * 11 + j] -= correction;
+            P[i * 15 + j] -= correction;
         }
     }
 
     // 5. 误差状态注入
     X_curr.pos.x += dx[0];
     X_curr.pos.y += dx[1];
-    // X_curr.pos.z 保持不变
-    X_curr.vel.x += dx[2];
-    X_curr.vel.y += dx[3];
-    // X_curr.vel.z 保持不变
+    X_curr.pos.z += dx[2];
+    X_curr.vel.x += dx[3];
+    X_curr.vel.y += dx[4];
+    X_curr.vel.z += dx[5];
     
-    // 只更新yaw，保持roll和pitch固定
-    if (fabs(dx[4]) > 1e-6f) {
-        float h_angle = dx[4] * 0.5f;
-        eskf_quat_t dq = {cosf(h_angle), 0, 0, sinf(h_angle)};
+    eskf_vec3_t theta_err = {dx[6], dx[7], dx[8]};
+    float theta_norm = vec3_norm(theta_err);
+    if (theta_norm > 1e-6f) {
+        float h_angle = theta_norm * 0.5f;
+        float s = sinf(h_angle) / theta_norm;
+        eskf_quat_t dq = {cosf(h_angle), dx[6]*s, dx[7]*s, dx[8]*s};
         X_curr.rot = quat_mul(X_curr.rot, dq); 
         quat_normalize(&X_curr.rot);
     }
-    X_curr.ba.x += dx[5];  X_curr.ba.y += dx[6]; X_curr.ba.z += dx[7];
-    X_curr.bg.x += dx[8]; X_curr.bg.y += dx[9]; X_curr.bg.z += dx[10];
+    X_curr.ba.x += dx[9];  X_curr.ba.y += dx[10]; X_curr.ba.z += dx[11];
+    X_curr.bg.x += dx[12]; X_curr.bg.y += dx[13]; X_curr.bg.z += dx[14];
 
     // 更新 buffer 中的状态
     eskf->X_buf[state_idx] = X_curr;
@@ -413,12 +405,12 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
     Y[1] = meas->v_body_y - v_b_pred[1];
     Y[2] = meas->v_body_wz - (imu_meas->gyro.z - X_curr.bg.z);
 
-    // 5. 雅可比矩阵 H (3 x 12)
+    // 5. 雅可比矩阵 H (3 x 15)
     // H 结构:
-    // Rows 0,1 (Vel): 对 Vel 和 Att (yaw) 有非零块
+    // Rows 0,1 (Vel): 对 Vel 和 Att 有非零块
     // Row  2   (Wz) : 对 Bg 有非零块 (H_wz_bg = -1, 因为 pred = gyro - bg, so d(pred)/d(bg) = -1)
     
-    // 计算 H_theta = R^T * [v_w]x (只yaw分量)
+    // 计算 H_theta = R^T * [v_w]x
     float vx_skew[9] = {
            0,   -v_w[2],  v_w[1],
          v_w[2],     0,  -v_w[0],
@@ -430,33 +422,50 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
     mat_mul(R_inv, vx_skew, H_theta, 3, 3, 3);
     
     // 用 H_vel 表示 R^T (2x3部分)
-    // 用 H_att 表示 H_theta (2x1部分，只yaw)
+    // 用 H_att 表示 H_theta (2x3部分)
 
-    // PHt = P * H^T  (11 x 3)
-    float PHt[33]; // 11 rows, 3 cols
+    // PHt = P * H^T  (15 x 3)
+    float PHt[45]; // 15 rows, 3 cols
     
-    for (int r = 0; r < 11; r++) {
-        float *row_P = &P[r*11];
+    for (int r = 0; r < 15; r++) {
+        float *row_P = &P[r*15];
         
         // --- Col 0 (Meas Vx) ---
-        // H = [0, R^T[0], R^T[0]*[v]x (只yaw), 0, 0]
+        // H = [0, R^T[0], R^T[0]*[v]x, 0, 0]
         float val0 = 0;
-        val0 += row_P[2] * R_inv[0*3+0] + row_P[3] * R_inv[0*3+1]; // P*H_vel^T (vel at 2,3, 只x,y)
-        val0 += row_P[4] * H_theta[0*3+2]; // P*H_att^T (yaw at 4, 只z分量)
+        val0 += row_P[3] * R_inv[0*3+0] + row_P[4] * R_inv[0*3+1] + row_P[5] * R_inv[0*3+2]; // P*H_vel^T
+        val0 += row_P[6] * H_theta[0*3+0] + row_P[7] * H_theta[0*3+1] + row_P[8] * H_theta[0*3+2]; // P*H_att^T
         PHt[r*3 + 0] = val0;
 
         // --- Col 1 (Meas Vy) ---
-        // H = [0, R^T[1], R^T[1]*[v]x (只yaw), 0, 0]
+        // H = [0, R^T[1], R^T[1]*[v]x, 0, 0]
         float val1 = 0;
-        val1 += row_P[2] * R_inv[1*3+0] + row_P[3] * R_inv[1*3+1]; 
-        val1 += row_P[4] * H_theta[1*3+2]; // 只yaw分量
+        val1 += row_P[3] * R_inv[1*3+0] + row_P[4] * R_inv[1*3+1] + row_P[5] * R_inv[1*3+2]; 
+        val1 += row_P[6] * H_theta[1*3+0] + row_P[7] * H_theta[1*3+1] + row_P[8] * H_theta[1*3+2];
         PHt[r*3 + 1] = val1;
         
         // --- Col 2 (Meas Wz) ---
         // 观测方程 h(x) = imu_wz - bg_z
+        // H = d(y)/dx = d(meas - h(x))/dx = d(- (-bg_z))/dx = d(bg_z)/dx = 1 ????
+        // 等一下，Residual Y = Meas - Pred.
+        // Pred = imu - bg.
+        // Y = meas - (imu - bg) = meas - imu + bg.
+        // dY/dbg = 1.
+        // 也就是说，H 在 bg_z (index 14) 处为 1. (之前推导以为是-1, 这里必须再次确认)
+        // 状态更新: x += K * Y.
+        // 如果测量的 Wz > 预测的 (imu-bg), 说明 Y > 0.
+        // 意味着 "真实的Wz" 比 "预测的" 大。
+        // IMU测量值是固定的。意味着 bg 可能估计大了(减多了)，或者 bg 估计小了？
+        // 如果 Y > 0 => meas > imu - bg => meas - imu > -bg => bg > imu - meas.
+        // 这表示我们需要增加 bg。
+        // 如果 H=1, K 正比于 P*H^T = P_col_bg.
+        // x += K * Y => bg += P_bb * 1 * Y. 正相关。
+        // 所以 H 对应 bg_z 应该是 1.
+        
+        // H = [0, ..., 0, -1 (at idx 14)] (d(meas - (imu - bg))/dbg = 1) -> No.
         // H = d(h(x))/dx. h(x) = imu - bg. H_bg = -1.
-        // So PHt = P * H^T = P * (-1) = -P_col_10 (bg_z at index 10)
-        PHt[r*3 + 2] = -row_P[10]; 
+        // So PHt = P * H^T = P * (-1) = -P_col_14.
+        PHt[r*3 + 2] = -row_P[14]; 
     }
 
     // S = H * PHt + Noise (3x3)
@@ -467,21 +476,24 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
     for(int m_row = 0; m_row < 2; m_row++) {
         for(int m_col = 0; m_col < 3; m_col++) {
              // S[r, c] = H[r] * PHt[:, c]
-             // H[r] has part R_inv[r] at Vel(2,3) and H_theta[r][2] at Att(4)
+             // H[r] has part R_inv[r] at Vel(3,4,5) and H_theta[r] at Att(6,7,8)
              float val = 0;
-             val += R_inv[m_row*3+0] * PHt[2*3 + m_col];
-             val += R_inv[m_row*3+1] * PHt[3*3 + m_col];
+             val += R_inv[m_row*3+0] * PHt[3*3 + m_col];
+             val += R_inv[m_row*3+1] * PHt[4*3 + m_col];
+             val += R_inv[m_row*3+2] * PHt[5*3 + m_col];
              
-             val += H_theta[m_row*3+2] * PHt[4*3 + m_col]; // 只yaw分量
+             val += H_theta[m_row*3+0] * PHt[6*3 + m_col];
+             val += H_theta[m_row*3+1] * PHt[7*3 + m_col];
+             val += H_theta[m_row*3+2] * PHt[8*3 + m_col];
              S[m_row*3 + m_col] = val;
         }
     }
     
     // 填充 S 的第 2 行 (Wz部分)
-    // dim 2 的 H 只有 H[10] = -1, 其他为0
+    // dim 2 的 H 只有 H[14] = -1, 其他为0
     for(int m_col = 0; m_col < 3; m_col++) {
-        // S[2, c] = H[2] * PHt[:, c] = -1.0 * PHt[10, c]
-        S[2*3 + m_col] = -PHt[10*3 + m_col];
+        // S[2, c] = H[2] * PHt[:, c] = -1.0 * PHt[14, c]
+        S[2*3 + m_col] = -PHt[14*3 + m_col];
     }
     // Add noise R
     S[0*3+0] += eskf->config.odom_vel_x_noise;
@@ -492,41 +504,41 @@ void eskf_update_odom(eskf_t *eskf, const eskf_odom_meas_t *meas) {
     float Si[9];
     if (mat_inv(S, Si, 3) != 0) return;
 
-    // K = PHt * Si (11x3 * 3x3 = 11x3)
-    float K[33]; // 11*3
-    mat_mul(PHt, Si, K, 11, 3, 3);
+    // K = PHt * Si (15x3 * 3x3 = 15x3)
+    float K[45]; // 15*3
+    mat_mul(PHt, Si, K, 15, 3, 3);
 
-    // dx = K * Y (11x3 * 3x1)
-    float dx[11];
-    mat_mul(K, Y, dx, 11, 3, 1);
+    // dx = K * Y (15x3 * 3x1)
+    float dx[15];
+    mat_mul(K, Y, dx, 15, 3, 1);
     
     // Update P = P - K * PHt^T
-    // P (11x11) -= K(11x3) * PHt^T(3x11)
-    for(int r=0; r<11; r++) {
-        for(int c=0; c<11; c++) {
+    // P (15x15) -= K(15x3) * PHt^T(3x15)
+    for(int r=0; r<15; r++) {
+        for(int c=0; c<15; c++) {
             float corr = 0.0f;
             for(int k=0; k<3; k++) {
                 corr += K[r*3+k] * PHt[c*3+k];
             }
-            P[r*11+c] -= corr;
+            P[r*15+c] -= corr;
         }
     }
     
     // 状态注入
-    X_curr.pos.x += dx[0]; X_curr.pos.y += dx[1]; 
-    // X_curr.pos.z 保持不变
-    X_curr.vel.x += dx[2]; X_curr.vel.y += dx[3]; 
-    // X_curr.vel.z 保持不变
+    X_curr.pos.x += dx[0]; X_curr.pos.y += dx[1]; X_curr.pos.z += dx[2];
+    X_curr.vel.x += dx[3]; X_curr.vel.y += dx[4]; X_curr.vel.z += dx[5];
     
-    // 只更新yaw，保持roll和pitch固定
-    if (fabs(dx[4]) > 1e-6f) {
-        float h_angle = dx[4] * 0.5f;
-        eskf_quat_t dq = {cosf(h_angle), 0, 0, sinf(h_angle)};
+    eskf_vec3_t theta_err = {dx[6], dx[7], dx[8]};
+    float theta_norm = vec3_norm(theta_err);
+    if (theta_norm > 1e-6f) {
+        float h_angle = theta_norm * 0.5f;
+        float s = sinf(h_angle) / theta_norm;
+        eskf_quat_t dq = {cosf(h_angle), dx[6]*s, dx[7]*s, dx[8]*s};
         X_curr.rot = quat_mul(X_curr.rot, dq); 
         quat_normalize(&X_curr.rot);
     }
-    X_curr.ba.x += dx[5];  X_curr.ba.y += dx[6]; X_curr.ba.z += dx[7];
-    X_curr.bg.x += dx[8]; X_curr.bg.y += dx[9]; X_curr.bg.z += dx[10];
+    X_curr.ba.x += dx[9];  X_curr.ba.y += dx[10]; X_curr.ba.z += dx[11];
+    X_curr.bg.x += dx[12]; X_curr.bg.y += dx[13]; X_curr.bg.z += dx[14];
 
     // 重积分
     eskf->X_buf[state_idx] = X_curr;
@@ -611,12 +623,12 @@ void eskf_update_odom_internal(eskf_t *eskf, const eskf_odom_meas_t *meas, const
     Y[1] = meas->v_body_y - v_b_pred[1];
     Y[2] = meas->v_body_wz - (imu_meas->gyro.z - X_curr.bg.z);
 
-    // 4. 雅可比矩阵 H (3 x 12)
+    // 4. 雅可比矩阵 H (3 x 15)
     // H 结构:
-    // Rows 0,1 (Vel): 对 Vel 和 Att (yaw) 有非零块
+    // Rows 0,1 (Vel): 对 Vel 和 Att 有非零块
     // Row  2   (Wz) : 对 Bg 有非零块 (H_wz_bg = -1, 因为 pred = gyro - bg, so d(pred)/d(bg) = -1)
     
-    // 计算 H_theta = R^T * [v_w]x (只yaw分量)
+    // 计算 H_theta = R^T * [v_w]x
     float vx_skew[9] = {
            0,   -v_w[2],  v_w[1],
          v_w[2],     0,  -v_w[0],
@@ -628,33 +640,50 @@ void eskf_update_odom_internal(eskf_t *eskf, const eskf_odom_meas_t *meas, const
     mat_mul(R_inv, vx_skew, H_theta, 3, 3, 3);
     
     // 用 H_vel 表示 R^T (2x3部分)
-    // 用 H_att 表示 H_theta (2x1部分，只yaw)
+    // 用 H_att 表示 H_theta (2x3部分)
 
-    // PHt = P * H^T  (11 x 3)
-    float PHt[33]; // 11 rows, 3 cols
+    // PHt = P * H^T  (15 x 3)
+    float PHt[45]; // 15 rows, 3 cols
     
-    for (int r = 0; r < 11; r++) {
-        float *row_P = &P[r*11];
+    for (int r = 0; r < 15; r++) {
+        float *row_P = &P[r*15];
         
         // --- Col 0 (Meas Vx) ---
-        // H = [0, R^T[0], R^T[0]*[v]x (只yaw), 0, 0]
+        // H = [0, R^T[0], R^T[0]*[v]x, 0, 0]
         float val0 = 0;
-        val0 += row_P[2] * R_inv[0*3+0] + row_P[3] * R_inv[0*3+1]; // P*H_vel^T (vel at 2,3, 只x,y)
-        val0 += row_P[4] * H_theta[0*3+2]; // P*H_att^T (yaw at 4, 只z分量)
+        val0 += row_P[3] * R_inv[0*3+0] + row_P[4] * R_inv[0*3+1] + row_P[5] * R_inv[0*3+2]; // P*H_vel^T
+        val0 += row_P[6] * H_theta[0*3+0] + row_P[7] * H_theta[0*3+1] + row_P[8] * H_theta[0*3+2]; // P*H_att^T
         PHt[r*3 + 0] = val0;
 
         // --- Col 1 (Meas Vy) ---
-        // H = [0, R^T[1], R^T[1]*[v]x (只yaw), 0, 0]
+        // H = [0, R^T[1], R^T[1]*[v]x, 0, 0]
         float val1 = 0;
-        val1 += row_P[2] * R_inv[1*3+0] + row_P[3] * R_inv[1*3+1]; 
-        val1 += row_P[4] * H_theta[1*3+2]; // 只yaw分量
+        val1 += row_P[3] * R_inv[1*3+0] + row_P[4] * R_inv[1*3+1] + row_P[5] * R_inv[1*3+2]; 
+        val1 += row_P[6] * H_theta[1*3+0] + row_P[7] * H_theta[1*3+1] + row_P[8] * H_theta[1*3+2];
         PHt[r*3 + 1] = val1;
         
         // --- Col 2 (Meas Wz) ---
         // 观测方程 h(x) = imu_wz - bg_z
+        // H = d(y)/dx = d(meas - h(x))/dx = d(- (-bg_z))/dx = d(bg_z)/dx = 1 ????
+        // 等一下，Residual Y = Meas - Pred.
+        // Pred = imu - bg.
+        // Y = meas - (imu - bg) = meas - imu + bg.
+        // dY/dbg = 1.
+        // 也就是说，H 在 bg_z (index 14) 处为 1. (之前推导以为是-1, 这里必须再次确认)
+        // 状态更新: x += K * Y.
+        // 如果测量的 Wz > 预测的 (imu-bg), 说明 Y > 0.
+        // 意味着 "真实的Wz" 比 "预测的" 大。
+        // IMU测量值是固定的。意味着 bg 可能估计大了(减多了)，或者 bg 估计小了？
+        // 如果 Y > 0 => meas > imu - bg => meas - imu > -bg => bg > imu - meas.
+        // 这表示我们需要增加 bg。
+        // 如果 H=1, K 正比于 P*H^T = P_col_bg.
+        // x += K * Y => bg += P_bb * 1 * Y. 正相关。
+        // 所以 H 对应 bg_z 应该是 1.
+        
+        // H = [0, ..., 0, -1 (at idx 14)] (d(meas - (imu - bg))/dbg = 1) -> No.
         // H = d(h(x))/dx. h(x) = imu - bg. H_bg = -1.
-        // So PHt = P * H^T = P * (-1) = -P_col_10 (bg_z at index 10)
-        PHt[r*3 + 2] = -row_P[10]; 
+        // So PHt = P * H^T = P * (-1) = -P_col_14.
+        PHt[r*3 + 2] = -row_P[14]; 
     }
 
     // S = H * PHt + Noise (3x3)
@@ -665,21 +694,24 @@ void eskf_update_odom_internal(eskf_t *eskf, const eskf_odom_meas_t *meas, const
     for(int m_row = 0; m_row < 2; m_row++) {
         for(int m_col = 0; m_col < 3; m_col++) {
              // S[r, c] = H[r] * PHt[:, c]
-             // H[r] has part R_inv[r] at Vel(2,3) and H_theta[r][2] at Att(4)
+             // H[r] has part R_inv[r] at Vel(3,4,5) and H_theta[r] at Att(6,7,8)
              float val = 0;
-             val += R_inv[m_row*3+0] * PHt[2*3 + m_col];
-             val += R_inv[m_row*3+1] * PHt[3*3 + m_col];
+             val += R_inv[m_row*3+0] * PHt[3*3 + m_col];
+             val += R_inv[m_row*3+1] * PHt[4*3 + m_col];
+             val += R_inv[m_row*3+2] * PHt[5*3 + m_col];
              
-             val += H_theta[m_row*3+2] * PHt[4*3 + m_col]; // 只yaw分量
+             val += H_theta[m_row*3+0] * PHt[6*3 + m_col];
+             val += H_theta[m_row*3+1] * PHt[7*3 + m_col];
+             val += H_theta[m_row*3+2] * PHt[8*3 + m_col];
              S[m_row*3 + m_col] = val;
         }
     }
     
     // 填充 S 的第 2 行 (Wz部分)
-    // dim 2 的 H 只有 H[10] = -1, 其他为0
+    // dim 2 的 H 只有 H[14] = -1, 其他为0
     for(int m_col = 0; m_col < 3; m_col++) {
-        // S[2, c] = H[2] * PHt[:, c] = -1.0 * PHt[10, c]
-        S[2*3 + m_col] = -PHt[10*3 + m_col];
+        // S[2, c] = H[2] * PHt[:, c] = -1.0 * PHt[14, c]
+        S[2*3 + m_col] = -PHt[14*3 + m_col];
     }
     // Add noise R
     S[0*3+0] += eskf->config.odom_vel_x_noise;
@@ -690,41 +722,41 @@ void eskf_update_odom_internal(eskf_t *eskf, const eskf_odom_meas_t *meas, const
     float Si[9];
     if (mat_inv(S, Si, 3) != 0) return;
 
-    // K = PHt * Si (11x3 * 3x3 = 11x3)
-    float K[33]; // 11*3
-    mat_mul(PHt, Si, K, 11, 3, 3);
+    // K = PHt * Si (15x3 * 3x3 = 15x3)
+    float K[45]; // 15*3
+    mat_mul(PHt, Si, K, 15, 3, 3);
 
-    // dx = K * Y (11x3 * 3x1)
-    float dx[11];
-    mat_mul(K, Y, dx, 11, 3, 1);
+    // dx = K * Y (15x3 * 3x1)
+    float dx[15];
+    mat_mul(K, Y, dx, 15, 3, 1);
     
     // Update P = P - K * PHt^T
-    // P (11x11) -= K(11x3) * PHt^T(3x11)
-    for(int r=0; r<11; r++) {
-        for(int c=0; c<11; c++) {
+    // P (15x15) -= K(15x3) * PHt^T(3x15)
+    for(int r=0; r<15; r++) {
+        for(int c=0; c<15; c++) {
             float corr = 0.0f;
             for(int k=0; k<3; k++) {
                 corr += K[r*3+k] * PHt[c*3+k];
             }
-            P[r*11+c] -= corr;
+            P[r*15+c] -= corr;
         }
     }
     
     // 状态注入
-    X_curr.pos.x += dx[0]; X_curr.pos.y += dx[1]; 
-    // X_curr.pos.z 保持不变
-    X_curr.vel.x += dx[2]; X_curr.vel.y += dx[3]; 
-    // X_curr.vel.z 保持不变
+    X_curr.pos.x += dx[0]; X_curr.pos.y += dx[1]; X_curr.pos.z += dx[2];
+    X_curr.vel.x += dx[3]; X_curr.vel.y += dx[4]; X_curr.vel.z += dx[5];
     
-    // 只更新yaw，保持roll和pitch固定
-    if (fabs(dx[4]) > 1e-6f) {
-        float h_angle = dx[4] * 0.5f;
-        eskf_quat_t dq = {cosf(h_angle), 0, 0, sinf(h_angle)};
+    eskf_vec3_t theta_err = {dx[6], dx[7], dx[8]};
+    float theta_norm = vec3_norm(theta_err);
+    if (theta_norm > 1e-6f) {
+        float h_angle = theta_norm * 0.5f;
+        float s = sinf(h_angle) / theta_norm;
+        eskf_quat_t dq = {cosf(h_angle), dx[6]*s, dx[7]*s, dx[8]*s};
         X_curr.rot = quat_mul(X_curr.rot, dq); 
         quat_normalize(&X_curr.rot);
     }
-    X_curr.ba.x += dx[5];  X_curr.ba.y += dx[6]; X_curr.ba.z += dx[7];
-    X_curr.bg.x += dx[8]; X_curr.bg.y += dx[9]; X_curr.bg.z += dx[10];
+    X_curr.ba.x += dx[9];  X_curr.ba.y += dx[10]; X_curr.ba.z += dx[11];
+    X_curr.bg.x += dx[12]; X_curr.bg.y += dx[13]; X_curr.bg.z += dx[14];
 
     // 更新当前状态
     eskf->X = X_curr;
@@ -752,42 +784,32 @@ static void propagate_one_step(eskf_t *eskf, const eskf_imu_meas_t *meas, float 
     eskf_vec3_t acc_b = vec3_sub(meas->acc, X->ba);
     eskf_vec3_t gyro_b = vec3_sub(meas->gyro, X->bg);
     
-    // 只使用x和y分量进行积分，z分量保持不变
     eskf_vec3_t acc_w = quat_rotate_vec(X->rot, acc_b);
     acc_w.x -= eskf->config.gravity.x; 
     acc_w.y -= eskf->config.gravity.y;
-    // 不处理z方向的加速度和速度
+    acc_w.z -= eskf->config.gravity.z; 
     
-    // Pos - 只更新x和y
-    eskf_vec3_t vel_dt = vec3_scale(X->vel, dt);
-    eskf_vec3_t acc_dt2 = vec3_scale(acc_w, 0.5f * dt * dt);
-    X->pos.x += vel_dt.x + acc_dt2.x;
-    X->pos.y += vel_dt.y + acc_dt2.y;
-    // X->pos.z 保持不变
+    // Pos
+    X->pos = vec3_add(X->pos, vec3_add(vec3_scale(X->vel, dt), vec3_scale(acc_w, 0.5f * dt * dt)));
+    // Vel
+    X->vel = vec3_add(X->vel, vec3_scale(acc_w, dt));
     
-    // Vel - 只更新x和y，保持z速度固定
-    X->vel.x += acc_w.x * dt;
-    X->vel.y += acc_w.y * dt;
-    // X->vel.z 保持不变
-    
-    // Rot - 只更新yaw，保持roll和pitch固定
-    // 这里简化处理，只使用z轴角速度
-    float yaw_rate = gyro_b.z;
-    float angle = yaw_rate * dt;
-    if (fabs(angle) > 1e-6f) {
-        // 只绕z轴旋转
-        eskf_quat_t dq = {cosf(angle/2.0f), 0, 0, sinf(angle/2.0f)};
+    // Rot (0th order)
+    float angle = vec3_norm(gyro_b) * dt;
+    if (angle > 1e-6f) {
+        eskf_vec3_t axis = vec3_scale(gyro_b, dt / angle);
+        float s = sinf(angle / 2.0f);
+        float c = cosf(angle / 2.0f);
+        eskf_quat_t dq = {c, axis.x * s, axis.y * s, axis.z * s};
         X->rot = quat_mul(X->rot, dq);
         quat_normalize(&X->rot);
     }
 
     // 2. 误差协方差预测 (Sparse In-Place Update)
-    // 新的状态顺序: pos(2), vel(2), theta(1), ba(3), bg(3)
     // F block structure:
-    // F01 = dt*I (2x2)
-    // F12 = -[R(am-ba)]x * dt (2x1, 只yaw分量)
-    // F13 = -R * dt (2x3)
-    // F24 = -R_z * dt (1x3, 只z轴分量)
+    // F01 = dt*I
+    // F12 = -[R(am-ba)]x * dt
+    // F13 = F24 = -R * dt
     
     float *P = eskf->P.P;
     
@@ -802,74 +824,74 @@ static void propagate_one_step(eskf_t *eskf, const eskf_imu_meas_t *meas, float 
     }
     
     eskf_vec3_t ap = quat_rotate_vec(X->rot, acc_b);
-    
-    // 只计算与yaw相关的F12分量 (只x,y分量)
-    float F12_yaw[2] = {-ap.y*dt, ap.x*dt}; // 只x,y分量
+    float F12[9] = {0, ap.z*dt, -ap.y*dt, -ap.z*dt, 0, ap.x*dt, ap.y*dt, -ap.x*dt, 0};
     float nRdt[9]; 
     for(int i=0; i<9; i++) nRdt[i] = -R[i] * dt;
 
     // Step 1: P = P * F^T (Column Update)
-    for (int r = 0; r < 11; r++) {
-        float *rp = &P[r*11];
-        float v_vel[2] = {rp[2], rp[3]};           // vel at indices 2,3
-        float v_att = rp[4];                        // yaw at index 4
-        float v_ba[3]  = {rp[5], rp[6], rp[7]};     // ba at indices 5,6,7
-        float v_bg[3]  = {rp[8], rp[9], rp[10]};    // bg at indices 8,9,10
+    for (int r = 0; r < 15; r++) {
+        float *rp = &P[r*15];
+        float v_vel[3] = {rp[3], rp[4], rp[5]};
+        float v_att[3] = {rp[6], rp[7], rp[8]};
+        float v_ba[3]  = {rp[9], rp[10], rp[11]};
+        float v_bg[3]  = {rp[12], rp[13], rp[14]};
 
-        // Col 0,1 (Pos) += dt * Col 2,3 (Vel)
-        rp[0] += dt * v_vel[0];
-        rp[1] += dt * v_vel[1];
+        // Col 0 (Pos) += dt * Col 1
+        rp[0] += dt * v_vel[0]; rp[1] += dt * v_vel[1]; rp[2] += dt * v_vel[2];
 
-        // Col 2,3 (Vel) += F12^T * Col 4 (Att) + F13^T * Col 5,6,7 (Ba)
-        float tmp[2] = {v_vel[0], v_vel[1]};
-        for(int k=0; k<2; k++) {
-            tmp[k] += v_att * F12_yaw[k]; // 只yaw分量
-            for(int j=0; j<3; j++) tmp[k] += v_ba[j] * nRdt[k*3+j]; 
+        // Col 1 (Vel) += F12^T * Col 2 + F13^T * Col 3
+        float tmp[3] = {v_vel[0], v_vel[1], v_vel[2]};
+        for(int k=0; k<3; k++) {
+            for(int j=0; j<3; j++) tmp[k] += v_att[j] * F12[k*3+j] + v_ba[j] * nRdt[k*3+j]; 
         }
         
-        rp[2] = tmp[0]; 
-        rp[3] = tmp[1]; 
+        rp[3]=tmp[0]; rp[4]=tmp[1]; rp[5]=tmp[2];
 
-        // Col 4 (Att) += F24^T * Col 8,9,10 (Bg) - 只z轴分量
-        float sum = 0;
-        for(int j=0; j<3; j++) sum += v_bg[j] * nRdt[8*3+j]; // 只z轴行
-        rp[4] += sum;
+        // Col 2 (Att) += F24^T * Col 4
+        for(int k=0; k<3; k++) {
+            float sum = 0;
+            for(int j=0; j<3; j++) sum += v_bg[j] * nRdt[k*3+j];
+            rp[6+k] += sum;
+        }
     }
 
     // Step 2: P = F * P (Row Update)
+    // Update Row 0, 1, 2 sequentially.
     
-    // Update Row 0,1 (Pos) += dt * Row 2,3 (Vel)
-    for(int c=0; c<11; c++) {
-        P[c] += dt * P[2*11+c];     // pos_x += dt * vel_x
-        P[11+c] += dt * P[3*11+c];  // pos_y += dt * vel_y
+    // Update Row 0 (Pos) += dt * Row 1
+    for(int c=0; c<15; c++) {
+        P[c] += dt * P[3*15+c];
+        P[15+c] += dt * P[4*15+c];
+        P[30+c] += dt * P[5*15+c];
     }
 
-    // Update Row 2,3 (Vel) += F12 * Row 4 (Att) + F13 * Row 5,6,7 (Ba)
-    for(int c=0; c<11; c++) {
-        float v_att = P[4*11+c];                  // yaw
-        float v_ba[3] = {P[5*11+c], P[6*11+c], P[7*11+c]}; // ba
-        for(int k=0; k<2; k++) {
+    // Update Row 1 (Vel) += F12 * Row 2 + F13 * Row 3
+    for(int c=0; c<15; c++) {
+        float v_att[3] = {P[6*15+c], P[7*15+c], P[8*15+c]};
+        float v_ba[3]  = {P[9*15+c], P[10*15+c], P[11*15+c]};
+        for(int k=0; k<3; k++) {
              float sum = 0;
-             sum += F12_yaw[k] * v_att; // 只yaw分量
-             for(int j=0; j<3; j++) sum += nRdt[k*3+j] * v_ba[j];
-             P[(2+k)*11+c] += sum;
+             for(int j=0; j<3; j++) sum += F12[k*3+j] * v_att[j] + nRdt[k*3+j] * v_ba[j];
+             P[(3+k)*15+c] += sum;
         }
     }
 
-    // Update Row 4 (Att) += F24 * Row 8,9,10 (Bg)
-    for(int c=0; c<11; c++) {
-        float v_bg[3] = {P[8*11+c], P[9*11+c], P[10*11+c]}; // bg
-        float sum = 0;
-        for(int j=0; j<3; j++) sum += nRdt[8*3+j] * v_bg[j]; // 只z轴行
-        P[4*11+c] += sum;
+    // Update Row 2 (Att) += F24 * Row 4
+    for(int c=0; c<15; c++) {
+        float v_bg[3] = {P[12*15+c], P[13*15+c], P[14*15+c]};
+        for(int k=0; k<3; k++) {
+             float sum = 0;
+             for(int j=0; j<3; j++) sum += nRdt[k*3+j] * v_bg[j];
+             P[(6+k)*15+c] += sum;
+        }
     }
 
     // Add Process Noise
     float dt2 = dt * dt;
-    for(int i=0; i<2; i++) P[(2+i)*11 + (2+i)] += eskf->config.acc_noise * dt2;     // vel (x,y)
-    P[4*11 + 4] += eskf->config.gyro_noise * dt2;                                    // yaw
-    for(int i=0; i<3; i++) P[(5+i)*11 + (5+i)] += eskf->config.acc_bias_noise * dt;  // ba
-    for(int i=0; i<3; i++) P[(8+i)*11 + (8+i)] += eskf->config.gyro_bias_noise * dt; // bg
+    for(int i=0; i<3; i++) P[(3+i)*15 + (3+i)] += eskf->config.acc_noise * dt2;
+    for(int i=0; i<3; i++) P[(6+i)*15 + (6+i)] += eskf->config.gyro_noise * dt2; 
+    for(int i=0; i<3; i++) P[(9+i)*15 + (9+i)] += eskf->config.acc_bias_noise * dt;
+    for(int i=0; i<3; i++) P[(12+i)*15 + (12+i)] += eskf->config.gyro_bias_noise * dt;
 }
 
 static float quat_to_yaw(eskf_quat_t q) {
